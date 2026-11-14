@@ -1,0 +1,5 @@
+.env
+dados.json
+dados.json.tmp
+__pycache__/
+*.pyc
