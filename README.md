@@ -1,6 +1,6 @@
 # Bot de lives (Twitch + YouTube) para Discord
 
-O bot verifica a cada 2 minutos se os canais cadastrados estão ao vivo e anuncia no Discord, com título, jogo, espectadores e thumbnail. Cada live é anunciada só uma vez.
+O bot verifica a cada 2 minutos se os canais cadastrados estão ao vivo e anuncia no Discord, com título, jogo, espectadores e thumbnail. Também divulga os **vídeos novos** dos canais do YouTube. Cada live ou vídeo é anunciado só uma vez.
 
 ## 1. Criar o bot no Discord
 1. Acesse https://discord.com/developers/applications → **New Application** → dê um nome.
@@ -45,6 +45,18 @@ Os comandos só aparecem para quem tem permissão de **Gerenciar servidor**.
 | `/remover` | Remove um canal (escolha na lista) |
 | `/lista` | Mostra canais monitorados e configuração |
 | `/testar` | Manda uma mensagem de teste no canal de anúncio |
+| `/videos` | Configura a divulgação de vídeos do YouTube (ativar, Shorts, canal próprio, marcar cargo) |
+| `/videos_canal_padrao` | Faz os vídeos voltarem a sair no mesmo canal das lives |
+
+### Vídeos do YouTube
+- Vêm **ativados** por padrão, no mesmo canal das lives e **sem marcar o cargo** (para não notificar a cada vídeo).
+- Só são divulgados vídeos publicados **depois** que o canal foi cadastrado, e com no máximo 24h. O histórico antigo nunca é anunciado.
+- Shorts ficam desligados por padrão. Ative com `/videos ativar:True shorts:True`.
+- A gravação de uma live que já terminou não é anunciada de novo.
+- Exemplos:
+  - `/videos ativar:True canal:#vídeos` → vídeos num canal separado
+  - `/videos ativar:True marcar_cargo:True` → marca o cargo também nos vídeos
+  - `/videos ativar:False` → volta a divulgar só lives
 
 ## Observações
 - O bot só anuncia enquanto estiver rodando. Para ficar 24h, deixe num PC ligado ou numa hospedagem (VPS ou um serviço de hospedagem de bots).

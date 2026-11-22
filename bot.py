@@ -5,7 +5,8 @@ Como funciona:
 - Você cadastra canais com /adicionar <link> (Twitch ou YouTube).
 - A cada X minutos o bot verifica quem está ao vivo.
 - Quando alguém entra ao vivo, o bot anuncia no canal definido com /canal.
-- Cada live é anunciada uma única vez (fica registrada em dados.json).
+- Vídeos novos do YouTube também são divulgados (configure com /videos).
+- Cada live/vídeo é anunciado uma única vez (fica registrado em dados.json).
 """
 import asyncio
 import json
@@ -14,6 +15,7 @@ import os
 import re
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -34,6 +36,11 @@ ARQUIVO_DADOS = os.getenv("ARQUIVO_DADOS", "dados.json")
 COR_TWITCH = 0x9146FF
 COR_YOUTUBE = 0xFF0000
 
+# Vídeos publicados há mais tempo que isso nunca são divulgados (evita spam de vídeos antigos)
+IDADE_MAXIMA_VIDEO = timedelta(hours=24)
+# Shorts têm até 3 minutos
+DURACAO_MAXIMA_SHORT = 180
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("livebot")
 
@@ -46,7 +53,7 @@ def carregar_dados():
         with open(ARQUIVO_DADOS, encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
-        return {"servidores": {}, "anunciados": []}
+        return {"servidores": {}, "anunciados": [], "yt_vistos": {}}
 
 
 def salvar_dados():
@@ -57,13 +64,39 @@ def salvar_dados():
 
 
 dados = carregar_dados()
+dados.setdefault("yt_vistos", {})
+
+PADRAO_SERVIDOR = {
+    "canal": None,
+    "cargo": None,
+    "twitch": [],
+    "youtube": {},
+    # vídeos do YouTube
+    "videos": True,
+    "shorts": False,
+    "canal_videos": None,  # None = usa o mesmo canal das lives
+    "marcar_videos": False,
+}
 
 
 def config_servidor(guild_id):
-    return dados["servidores"].setdefault(
-        str(guild_id),
-        {"canal": None, "cargo": None, "twitch": [], "youtube": {}},
-    )
+    s = dados["servidores"].setdefault(str(guild_id), {})
+    for chave, valor in PADRAO_SERVIDOR.items():  # completa configs antigas
+        s.setdefault(chave, valor.copy() if isinstance(valor, (list, dict)) else valor)
+    return s
+
+
+def todos_servidores():
+    return [(gid, config_servidor(gid)) for gid in list(dados["servidores"])]
+
+
+def registrar_vistos(channel_id, ids):
+    """Guarda os vídeos já conhecidos de um canal (até 50 por canal)."""
+    vistos = dados["yt_vistos"].setdefault(channel_id, [])
+    for v in ids:
+        if v not in vistos:
+            vistos.append(v)
+    dados["yt_vistos"][channel_id] = vistos[-50:]
 
 
 def ja_anunciado(chave):
@@ -191,10 +224,49 @@ class YouTube:
         for i in range(0, len(ids), 50):
             d = await self._get(
                 "videos",
-                {"part": "snippet,liveStreamingDetails", "id": ",".join(ids[i : i + 50])},
+                {
+                    "part": "snippet,liveStreamingDetails,contentDetails",
+                    "id": ",".join(ids[i : i + 50]),
+                },
             )
             itens += d.get("items", [])
         return itens
+
+    async def eh_short(self, video):
+        """Shorts têm até 3 min e abrem em youtube.com/shorts/ sem redirecionar."""
+        if duracao_segundos(video) > DURACAO_MAXIMA_SHORT:
+            return False
+        try:
+            async with self.s.head(
+                f"https://www.youtube.com/shorts/{video['id']}", allow_redirects=False
+            ) as r:
+                return r.status == 200
+        except aiohttp.ClientError:
+            return False
+
+
+def duracao_segundos(video):
+    """Converte a duração ISO 8601 do YouTube (ex.: PT1H2M3S) em segundos."""
+    texto = video.get("contentDetails", {}).get("duration", "")
+    m = re.fullmatch(r"P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", texto)
+    if not m:
+        return 0
+    d, h, mi, s = (int(x or 0) for x in m.groups())
+    return d * 86400 + h * 3600 + mi * 60 + s
+
+
+def formatar_duracao(segundos):
+    h, resto = divmod(segundos, 3600)
+    m, s = divmod(resto, 60)
+    return f"{h}:{m:02}:{s:02}" if h else f"{m}:{s:02}"
+
+
+def publicado_recentemente(video):
+    texto = video["snippet"].get("publishedAt")
+    if not texto:
+        return False
+    publicado = datetime.fromisoformat(texto.replace("Z", "+00:00"))
+    return datetime.now(timezone.utc) - publicado <= IDADE_MAXIMA_VIDEO
 
 
 # =====================================================================
@@ -229,6 +301,18 @@ def embed_youtube(video):
             e.set_image(url=thumbs[qualidade]["url"])
             break
     return e, url, sn["channelTitle"]
+
+
+def embed_video(video, short):
+    e, url, nome = embed_youtube(video)
+    e.clear_fields()
+    if short:
+        url = f"https://www.youtube.com/shorts/{video['id']}"
+        e.url = url
+    duracao = duracao_segundos(video)
+    if duracao:
+        e.add_field(name="Duração", value=formatar_duracao(duracao))
+    return e, url, nome
 
 
 # =====================================================================
@@ -291,48 +375,93 @@ class LiveBot(discord.Client):
                 continue
             login = live["user_login"].lower()
             e, url, nome = embed_twitch(live)
-            await self.anunciar(lambda s, l=login: l in s["twitch"], e, url, nome)
+            await self.anunciar(
+                lambda s, l=login: l in s["twitch"],
+                e,
+                f"🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo! <{url}>",
+            )
             marcar_anunciado(chave)
 
     async def checar_youtube(self):
         if not self.youtube:
             return
-        canais = {c for s in dados["servidores"].values() for c in s["youtube"]}
+        canais = sorted({c for _, s in todos_servidores() for c in s["youtube"]})
         if not canais:
             return
         resultados = await asyncio.gather(
             *(self.youtube.videos_recentes(c) for c in canais), return_exceptions=True
         )
-        ids = [v for r in resultados if isinstance(r, list) for v in r if v]
+        ids = []
+        novos = set()
+        for cid, r in zip(canais, resultados):
+            if not isinstance(r, list) or not r:
+                continue  # feed falhou: pula o canal nesta rodada
+            r = [v for v in r if v]
+            if cid not in dados["yt_vistos"]:
+                # primeira vez vendo o canal: os vídeos atuais servem de base e não são divulgados
+                registrar_vistos(cid, r)
+                salvar_dados()
+            else:
+                novos.update(v for v in r if v not in dados["yt_vistos"][cid])
+            ids += r
         if not ids:
             return
-        for video in await self.youtube.detalhes(ids):
-            if video["snippet"].get("liveBroadcastContent") != "live":
-                continue
-            chave = f"yt:{video['id']}"
-            if ja_anunciado(chave):
-                continue
-            cid = video["snippet"]["channelId"]
-            e, url, nome = embed_youtube(video)
-            await self.anunciar(lambda s, c=cid: c in s["youtube"], e, url, nome)
-            marcar_anunciado(chave)
 
-    async def anunciar(self, filtro, embed, url, nome):
-        for gid, s in dados["servidores"].items():
-            if not s.get("canal") or not filtro(s):
+        for video in await self.youtube.detalhes(ids):
+            sn = video["snippet"]
+            cid = sn["channelId"]
+            estado = sn.get("liveBroadcastContent")
+
+            # ----- live -----
+            if estado == "live":
+                chave = f"yt:{video['id']}"
+                if not ja_anunciado(chave):
+                    e, url, nome = embed_youtube(video)
+                    await self.anunciar(
+                        lambda s, c=cid: c in s["youtube"],
+                        e,
+                        f"🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo! <{url}>",
+                    )
+                    marcar_anunciado(chave)
                 continue
-            canal = self.get_channel(s["canal"])
+
+            # ----- vídeo novo -----
+            if video["id"] not in novos or estado == "upcoming":
+                continue  # já conhecido, ou live/estreia agendada (decide depois)
+            registrar_vistos(cid, [video["id"]])
+            salvar_dados()
+            if "liveStreamingDetails" in video:
+                continue  # gravação de uma live que já terminou
+            if not publicado_recentemente(video):
+                continue
+            short = await self.youtube.eh_short(video)
+            e, url, nome = embed_video(video, short)
+            tipo = "um Short novo" if short else "um vídeo novo"
+            await self.anunciar(
+                lambda s, c=cid, sh=short: c in s["youtube"] and s["videos"] and (s["shorts"] or not sh),
+                e,
+                f"📺 **{discord.utils.escape_markdown(nome)}** postou {tipo}! <{url}>",
+                video=True,
+            )
+
+    async def anunciar(self, filtro, embed, texto, video=False):
+        for gid, s in todos_servidores():
+            canal_id = (s["canal_videos"] or s["canal"]) if video else s["canal"]
+            if not canal_id or not filtro(s):
+                continue
+            canal = self.get_channel(canal_id)
             if canal is None:
-                log.warning("Canal %s do servidor %s não encontrado", s["canal"], gid)
+                log.warning("Canal %s do servidor %s não encontrado", canal_id, gid)
                 continue
-            mencao = f"<@&{s['cargo']}> " if s.get("cargo") else ""
+            marcar = s["cargo"] and (s["marcar_videos"] or not video)
+            mencao = f"<@&{s['cargo']}> " if marcar else ""
             try:
                 await canal.send(
-                    f"{mencao}🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo! <{url}>",
+                    f"{mencao}{texto}",
                     embed=embed,
                     allowed_mentions=discord.AllowedMentions(roles=True),
                 )
-                log.info("Anunciado: %s no servidor %s", nome, gid)
+                log.info("Anunciado no servidor %s: %s", gid, texto)
             except discord.HTTPException as erro:
                 log.warning("Não consegui anunciar no servidor %s: %s", gid, erro)
 
@@ -397,6 +526,11 @@ async def cmd_adicionar(inter: discord.Interaction, link: str):
             if cid in s["youtube"]:
                 return await inter.followup.send(f"**{titulo}** já está na lista.")
             s["youtube"][cid] = titulo
+            if cid not in dados["yt_vistos"]:
+                # vídeos que já existem não são divulgados, só os que saírem daqui pra frente
+                atuais = await bot.youtube.videos_recentes(cid)
+                if atuais:
+                    registrar_vistos(cid, [v for v in atuais if v])
             nome = f"YouTube • {titulo}"
         else:
             return await inter.followup.send(
@@ -447,7 +581,67 @@ async def cmd_lista(inter: discord.Interaction):
     e = discord.Embed(title="Canais monitorados", description="\n".join(linhas) or "Nenhum ainda. Use `/adicionar`.")
     e.add_field(name="Canal de anúncio", value=f"<#{s['canal']}>" if s["canal"] else "não definido")
     e.add_field(name="Cargo marcado", value=f"<@&{s['cargo']}>" if s["cargo"] else "nenhum")
+    if s["videos"]:
+        canal_v = f"<#{s['canal_videos']}>" if s["canal_videos"] else "mesmo das lives"
+        extras = []
+        if s["shorts"]:
+            extras.append("com Shorts")
+        if s["marcar_videos"] and s["cargo"]:
+            extras.append("marcando o cargo")
+        videos = f"ativados • {canal_v}" + (f" • {', '.join(extras)}" if extras else "")
+    else:
+        videos = "desativados"
+    e.add_field(name="Vídeos do YouTube", value=videos, inline=False)
     await inter.response.send_message(embed=e, ephemeral=True)
+
+
+@bot.tree.command(name="videos", description="Configura a divulgação de vídeos novos do YouTube")
+@app_commands.describe(
+    ativar="Divulgar vídeos novos (não só lives)?",
+    shorts="Divulgar também os Shorts?",
+    canal="Canal para os vídeos (vazio = mesmo canal das lives)",
+    marcar_cargo="Marcar o cargo definido em /cargo nos vídeos também?",
+)
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+async def cmd_videos(
+    inter: discord.Interaction,
+    ativar: bool,
+    shorts: Optional[bool] = None,
+    canal: Optional[discord.TextChannel] = None,
+    marcar_cargo: Optional[bool] = None,
+):
+    s = config_servidor(inter.guild_id)
+    if canal:
+        perms = canal.permissions_for(inter.guild.me)
+        if not (perms.view_channel and perms.send_messages and perms.embed_links):
+            return await inter.response.send_message(
+                f"Não tenho permissão para ver, enviar mensagens e embeds em {canal.mention}.", ephemeral=True
+            )
+        s["canal_videos"] = canal.id
+    s["videos"] = ativar
+    if shorts is not None:
+        s["shorts"] = shorts
+    if marcar_cargo is not None:
+        s["marcar_videos"] = marcar_cargo
+    salvar_dados()
+    if not ativar:
+        return await inter.response.send_message("✅ Vídeos desativados: só lives serão divulgadas.", ephemeral=True)
+    destino = f"<#{s['canal_videos']}>" if s["canal_videos"] else "no mesmo canal das lives"
+    msg = (
+        f"✅ Vídeos novos do YouTube serão divulgados em {destino}."
+        f"\nShorts: {'sim' if s['shorts'] else 'não'} • Marcar cargo: {'sim' if s['marcar_videos'] else 'não'}"
+    )
+    await inter.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="videos_canal_padrao", description="Volta a divulgar os vídeos no mesmo canal das lives")
+@app_commands.guild_only()
+@app_commands.default_permissions(manage_guild=True)
+async def cmd_videos_canal_padrao(inter: discord.Interaction):
+    config_servidor(inter.guild_id)["canal_videos"] = None
+    salvar_dados()
+    await inter.response.send_message("✅ Os vídeos voltam a sair no mesmo canal das lives.", ephemeral=True)
 
 
 @bot.tree.command(name="testar", description="Envia uma mensagem de teste no canal de anúncio")
