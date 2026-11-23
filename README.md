@@ -35,10 +35,12 @@ python bot.py
 Se aparecer `Logado como ...` no terminal, está online.
 
 ## 5. Usar no Discord
-Os comandos só aparecem para quem tem permissão de **Gerenciar servidor**.
+O `/aovivo` pode ser usado por **qualquer membro** e mostra quem está ao vivo agora.
+Os outros comandos só aparecem para quem tem permissão de **Gerenciar servidor**.
 
 | Comando | O que faz |
 |---|---|
+| `/aovivo` | Lista quem está ao vivo agora, com jogo, espectadores e há quanto tempo começou (todos podem usar) |
 | `/canal #canal` | Define onde as lives serão anunciadas |
 | `/cargo @cargo` | Cargo marcado nos anúncios (vazio = ninguém) |
 | `/adicionar link` | Adiciona um canal: `twitch.tv/nome`, `youtube.com/@nome`, `youtube.com/channel/UC...` ou link de uma live/vídeo |
@@ -57,6 +59,13 @@ Os comandos só aparecem para quem tem permissão de **Gerenciar servidor**.
   - `/videos ativar:True canal:#vídeos` → vídeos num canal separado
   - `/videos ativar:True marcar_cargo:True` → marca o cargo também nos vídeos
   - `/videos ativar:False` → volta a divulgar só lives
+
+### Ícones
+Os anúncios mostram a foto do streamer e o ícone da plataforma no rodapé. O texto usa 🟣 para a Twitch e ▶️ para o YouTube.
+Para usar emojis próprios do servidor:
+1. Envie as imagens como emoji em **Configurações do servidor → Emoji** (ex.: nomes `twitch` e `youtube`).
+2. Num canal, digite `\:twitch:` e envie. Vai aparecer um código como `<:twitch:123456789012345678>`.
+3. Cole esse código no `.env`, em `EMOJI_TWITCH` (e faça o mesmo com o `EMOJI_YOUTUBE`), e reinicie o bot.
 
 ## Observações
 - O bot só anuncia enquanto estiver rodando. Para ficar 24h, deixe num PC ligado ou numa hospedagem (VPS ou um serviço de hospedagem de bots).

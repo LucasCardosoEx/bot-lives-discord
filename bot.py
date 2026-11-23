@@ -36,6 +36,13 @@ ARQUIVO_DADOS = os.getenv("ARQUIVO_DADOS", "dados.json")
 COR_TWITCH = 0x9146FF
 COR_YOUTUBE = 0xFF0000
 
+# Ícones das plataformas (rodapé dos anúncios). Dá para trocar no .env por outro link de imagem.
+ICONE_TWITCH = os.getenv("ICONE_TWITCH") or "https://www.google.com/s2/favicons?domain=twitch.tv&sz=64"
+ICONE_YOUTUBE = os.getenv("ICONE_YOUTUBE") or "https://www.google.com/s2/favicons?domain=youtube.com&sz=64"
+# Emoji que aparece no texto. Para usar um emoji do servidor: <:twitch:ID_DO_EMOJI>
+EMOJI_TWITCH = os.getenv("EMOJI_TWITCH") or "🟣"
+EMOJI_YOUTUBE = os.getenv("EMOJI_YOUTUBE") or "▶️"
+
 # Vídeos publicados há mais tempo que isso nunca são divulgados (evita spam de vídeos antigos)
 IDADE_MAXIMA_VIDEO = timedelta(hours=24)
 # Shorts têm até 3 minutos
@@ -135,6 +142,7 @@ class Twitch:
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
         self.token = None
+        self.avatares = {}
 
     async def _gerar_token(self):
         async with self.s.post(
@@ -173,6 +181,16 @@ class Twitch:
             resultado += d["data"]
         return resultado
 
+    async def avatar(self, user_id):
+        """Foto de perfil do streamer (guardada em memória para não consultar toda vez)."""
+        if user_id not in self.avatares:
+            try:
+                d = await self._get("https://api.twitch.tv/helix/users", [("id", user_id)])
+                self.avatares[user_id] = d["data"][0]["profile_image_url"] if d["data"] else None
+            except (aiohttp.ClientError, RuntimeError):
+                return None
+        return self.avatares[user_id]
+
 
 # =====================================================================
 # YouTube (RSS gratuito + YouTube Data API v3)
@@ -182,6 +200,18 @@ class YouTube:
 
     def __init__(self, session: aiohttp.ClientSession):
         self.s = session
+        self.avatares = {}
+
+    async def avatar(self, channel_id):
+        """Foto do canal (guardada em memória; 1 unidade de cota só na primeira vez)."""
+        if channel_id not in self.avatares:
+            try:
+                d = await self._get("channels", {"part": "snippet", "id": channel_id})
+                thumbs = (d.get("items") or [{}])[0].get("snippet", {}).get("thumbnails", {})
+                self.avatares[channel_id] = (thumbs.get("medium") or thumbs.get("default") or {}).get("url")
+            except aiohttp.ClientError:
+                return None
+        return self.avatares[channel_id]
 
     async def _get(self, rota, params):
         params = {**params, "key": YOUTUBE_API_KEY}
@@ -272,10 +302,25 @@ def publicado_recentemente(video):
 # =====================================================================
 # Embeds de anúncio
 # =====================================================================
-def embed_twitch(live):
+def data_iso(texto):
+    """Converte '2026-11-23T15:00:00Z' em datetime (ou None)."""
+    if not texto:
+        return None
+    try:
+        return datetime.fromisoformat(texto.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def embed_twitch(live, avatar=None):
     url = f"https://www.twitch.tv/{live['user_login']}"
-    e = discord.Embed(title=live["title"][:256] or "Ao vivo", url=url, color=COR_TWITCH)
-    e.set_author(name=f"{live['user_name']} • Twitch", url=url)
+    e = discord.Embed(
+        title=live["title"][:256] or "Ao vivo", url=url, color=COR_TWITCH,
+        timestamp=data_iso(live.get("started_at")),
+    )
+    e.set_author(name=live["user_name"], url=url, icon_url=avatar)
+    e.set_thumbnail(url=avatar)
+    e.set_footer(text="Twitch • começou", icon_url=ICONE_TWITCH)
     if live.get("game_name"):
         e.add_field(name="Jogo", value=live["game_name"])
     e.add_field(name="Espectadores", value=str(live.get("viewer_count", 0)))
@@ -284,14 +329,19 @@ def embed_twitch(live):
     return e, url, live["user_name"]
 
 
-def embed_youtube(video):
+def embed_youtube(video, avatar=None):
     sn = video["snippet"]
     url = f"https://www.youtube.com/watch?v={video['id']}"
-    e = discord.Embed(title=sn["title"][:256], url=url, color=COR_YOUTUBE)
+    ao_vivo = sn.get("liveBroadcastContent") == "live"
+    inicio = video.get("liveStreamingDetails", {}).get("actualStartTime") if ao_vivo else sn.get("publishedAt")
+    e = discord.Embed(title=sn["title"][:256], url=url, color=COR_YOUTUBE, timestamp=data_iso(inicio))
     e.set_author(
-        name=f"{sn['channelTitle']} • YouTube",
+        name=sn["channelTitle"],
         url=f"https://www.youtube.com/channel/{sn['channelId']}",
+        icon_url=avatar,
     )
+    e.set_thumbnail(url=avatar)
+    e.set_footer(text="YouTube • começou" if ao_vivo else "YouTube • publicado", icon_url=ICONE_YOUTUBE)
     espectadores = video.get("liveStreamingDetails", {}).get("concurrentViewers")
     if espectadores:
         e.add_field(name="Espectadores", value=espectadores)
@@ -303,8 +353,8 @@ def embed_youtube(video):
     return e, url, sn["channelTitle"]
 
 
-def embed_video(video, short):
-    e, url, nome = embed_youtube(video)
+def embed_video(video, short, avatar=None):
+    e, url, nome = embed_youtube(video, avatar)
     e.clear_fields()
     if short:
         url = f"https://www.youtube.com/shorts/{video['id']}"
@@ -325,6 +375,9 @@ class LiveBot(discord.Client):
         self.sessao = None
         self.twitch = None
         self.youtube = None
+        # quem está ao vivo agora (atualizado a cada verificação, usado pelo /aovivo)
+        self.ao_vivo_twitch = {}   # login -> info
+        self.ao_vivo_youtube = {}  # channel_id -> info
 
     async def setup_hook(self):
         self.sessao = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=20))
@@ -366,19 +419,34 @@ class LiveBot(discord.Client):
     async def checar_twitch(self):
         if not self.twitch:
             return
-        logins = sorted({l for s in dados["servidores"].values() for l in s["twitch"]})
+        logins = sorted({l for _, s in todos_servidores() for l in s["twitch"]})
         if not logins:
+            self.ao_vivo_twitch = {}
             return
-        for live in await self.twitch.lives(logins):
+        lives = await self.twitch.lives(logins)
+        self.ao_vivo_twitch = {
+            live["user_login"].lower(): {
+                "plataforma": "twitch",
+                "nome": live["user_name"],
+                "titulo": live["title"],
+                "url": f"https://www.twitch.tv/{live['user_login']}",
+                "jogo": live.get("game_name"),
+                "espectadores": live.get("viewer_count"),
+                "inicio": data_iso(live.get("started_at")),
+            }
+            for live in lives
+        }
+        for live in lives:
             chave = f"tw:{live['id']}"
             if ja_anunciado(chave):
                 continue
             login = live["user_login"].lower()
-            e, url, nome = embed_twitch(live)
+            avatar = await self.twitch.avatar(live["user_id"])
+            e, url, nome = embed_twitch(live, avatar)
             await self.anunciar(
                 lambda s, l=login: l in s["twitch"],
                 e,
-                f"🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo! <{url}>",
+                f"🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo na {EMOJI_TWITCH} **Twitch**! <{url}>",
             )
             marcar_anunciado(chave)
 
@@ -387,15 +455,20 @@ class LiveBot(discord.Client):
             return
         canais = sorted({c for _, s in todos_servidores() for c in s["youtube"]})
         if not canais:
+            self.ao_vivo_youtube = {}
             return
         resultados = await asyncio.gather(
             *(self.youtube.videos_recentes(c) for c in canais), return_exceptions=True
         )
         ids = []
         novos = set()
+        ao_vivo = {}
         for cid, r in zip(canais, resultados):
             if not isinstance(r, list) or not r:
-                continue  # feed falhou: pula o canal nesta rodada
+                # feed falhou: pula o canal nesta rodada, mas mantém o status de ao vivo anterior
+                if cid in self.ao_vivo_youtube:
+                    ao_vivo[cid] = self.ao_vivo_youtube[cid]
+                continue
             r = [v for v in r if v]
             if cid not in dados["yt_vistos"]:
                 # primeira vez vendo o canal: os vídeos atuais servem de base e não são divulgados
@@ -405,9 +478,25 @@ class LiveBot(discord.Client):
                 novos.update(v for v in r if v not in dados["yt_vistos"][cid])
             ids += r
         if not ids:
+            self.ao_vivo_youtube = ao_vivo
             return
 
-        for video in await self.youtube.detalhes(ids):
+        detalhes = await self.youtube.detalhes(ids)
+        for video in detalhes:
+            sn = video["snippet"]
+            if sn.get("liveBroadcastContent") == "live" and sn["channelId"] not in ao_vivo:
+                ao_vivo[sn["channelId"]] = {
+                    "plataforma": "youtube",
+                    "nome": sn["channelTitle"],
+                    "titulo": sn["title"],
+                    "url": f"https://www.youtube.com/watch?v={video['id']}",
+                    "jogo": None,
+                    "espectadores": video.get("liveStreamingDetails", {}).get("concurrentViewers"),
+                    "inicio": data_iso(video.get("liveStreamingDetails", {}).get("actualStartTime")),
+                }
+        self.ao_vivo_youtube = ao_vivo
+
+        for video in detalhes:
             sn = video["snippet"]
             cid = sn["channelId"]
             estado = sn.get("liveBroadcastContent")
@@ -416,11 +505,12 @@ class LiveBot(discord.Client):
             if estado == "live":
                 chave = f"yt:{video['id']}"
                 if not ja_anunciado(chave):
-                    e, url, nome = embed_youtube(video)
+                    avatar = await self.youtube.avatar(cid)
+                    e, url, nome = embed_youtube(video, avatar)
                     await self.anunciar(
                         lambda s, c=cid: c in s["youtube"],
                         e,
-                        f"🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo! <{url}>",
+                        f"🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo no {EMOJI_YOUTUBE} **YouTube**! <{url}>",
                     )
                     marcar_anunciado(chave)
                 continue
@@ -435,12 +525,13 @@ class LiveBot(discord.Client):
             if not publicado_recentemente(video):
                 continue
             short = await self.youtube.eh_short(video)
-            e, url, nome = embed_video(video, short)
+            avatar = await self.youtube.avatar(cid)
+            e, url, nome = embed_video(video, short, avatar)
             tipo = "um Short novo" if short else "um vídeo novo"
             await self.anunciar(
                 lambda s, c=cid, sh=short: c in s["youtube"] and s["videos"] and (s["shorts"] or not sh),
                 e,
-                f"📺 **{discord.utils.escape_markdown(nome)}** postou {tipo}! <{url}>",
+                f"{EMOJI_YOUTUBE} **{discord.utils.escape_markdown(nome)}** postou {tipo} no **YouTube**! <{url}>",
                 video=True,
             )
 
@@ -642,6 +733,48 @@ async def cmd_videos_canal_padrao(inter: discord.Interaction):
     config_servidor(inter.guild_id)["canal_videos"] = None
     salvar_dados()
     await inter.response.send_message("✅ Os vídeos voltam a sair no mesmo canal das lives.", ephemeral=True)
+
+
+def quem_esta_ao_vivo(s):
+    """Junta as lives em andamento dos canais cadastrados neste servidor."""
+    lives = [bot.ao_vivo_twitch[l] for l in s["twitch"] if l in bot.ao_vivo_twitch]
+    lives += [bot.ao_vivo_youtube[c] for c in s["youtube"] if c in bot.ao_vivo_youtube]
+    agora = datetime.now(timezone.utc)
+    return sorted(lives, key=lambda x: x["inicio"] or agora)  # quem começou antes aparece primeiro
+
+
+@bot.tree.command(name="aovivo", description="Mostra quem está ao vivo agora")
+@app_commands.guild_only()
+async def cmd_aovivo(inter: discord.Interaction):
+    s = config_servidor(inter.guild_id)
+    lives = quem_esta_ao_vivo(s)
+    if not lives:
+        return await inter.response.send_message("😴 Ninguém está ao vivo agora.")
+
+    linhas = []
+    for live in lives:
+        emoji = EMOJI_TWITCH if live["plataforma"] == "twitch" else EMOJI_YOUTUBE
+        nome = discord.utils.escape_markdown(live["nome"])
+        titulo = discord.utils.escape_markdown((live["titulo"] or "")[:80])
+        detalhes = []
+        if live["jogo"]:
+            detalhes.append(f"🎮 {live['jogo']}")
+        if live["espectadores"] is not None:
+            detalhes.append(f"👀 {int(live['espectadores']):,}".replace(",", "."))
+        if live["inicio"]:
+            detalhes.append(f"⏱️ <t:{int(live['inicio'].timestamp())}:R>")
+        linhas.append(f"{emoji} **[{nome}]({live['url']})** — {titulo}\n" + " • ".join(detalhes))
+
+    descricao = ""
+    for linha in linhas:
+        if len(descricao) + len(linha) > 4000:  # limite do Discord
+            descricao += "\n…"
+            break
+        descricao += linha + "\n\n"
+
+    e = discord.Embed(title=f"🔴 Ao vivo agora ({len(lives)})", description=descricao.strip(), color=COR_TWITCH)
+    e.set_footer(text=f"Atualizado a cada {INTERVALO_MINUTOS:g} min")
+    await inter.response.send_message(embed=e)
 
 
 @bot.tree.command(name="testar", description="Envia uma mensagem de teste no canal de anúncio")
