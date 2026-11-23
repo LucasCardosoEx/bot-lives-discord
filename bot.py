@@ -45,13 +45,37 @@ EMOJI_TWITCH = os.getenv("EMOJI_TWITCH") or "🟣"
 EMOJI_YOUTUBE = os.getenv("EMOJI_YOUTUBE") or "▶️"
 
 
-def icones(guild, plataforma):
+# Nomes aceitos para os emojis do servidor (sem diferenciar maiúsculas)
+NOMES_EMOJI = {"twitch": {"twitch", "twich"}, "youtube": {"youtube", "yt"}}
+_emojis_buscados = {}  # guild_id -> (horário, lista de emojis), para não consultar o Discord toda hora
+
+
+async def emojis_do_servidor(guild):
+    """Emojis do servidor. Se a memória do bot estiver vazia, busca direto no Discord (a cada 5 min no máximo)."""
+    if guild.emojis:
+        return guild.emojis
+    horario, lista = _emojis_buscados.get(guild.id, (0, []))
+    if time.time() - horario > 300:
+        try:
+            lista = await guild.fetch_emojis()
+        except discord.HTTPException as erro:
+            log.warning("Não consegui buscar os emojis do servidor %s: %s", guild.id, erro)
+        _emojis_buscados[guild.id] = (time.time(), lista)
+    return lista
+
+
+async def icones(guild, plataforma):
     """Retorna (emoji para o texto, link do ícone do rodapé) para este servidor."""
     if plataforma == "twitch":
         emoji, icone = EMOJI_TWITCH, ICONE_TWITCH
     else:
         emoji, icone = EMOJI_YOUTUBE, ICONE_YOUTUBE
-    proprio = discord.utils.get(guild.emojis, name=plataforma) if guild else None
+    proprio = None
+    if guild:
+        for e in await emojis_do_servidor(guild):
+            if e.name.lower() in NOMES_EMOJI[plataforma]:
+                proprio = e
+                break
     if proprio:
         emoji = str(proprio)
         if not os.getenv(f"ICONE_{plataforma.upper()}"):
@@ -567,7 +591,7 @@ class LiveBot(discord.Client):
             marcar = s["cargo"] and (s["marcar_videos"] or not video)
             mencao = f"<@&{s['cargo']}> " if marcar else ""
             # cada servidor pode ter os próprios emojis "twitch"/"youtube"
-            emoji, icone = icones(getattr(canal, "guild", None), plataforma)
+            emoji, icone = await icones(getattr(canal, "guild", None), plataforma)
             e = embed.copy()
             e.set_footer(text=embed.footer.text, icon_url=icone)
             try:
@@ -790,7 +814,7 @@ async def cmd_aovivo(inter: discord.Interaction):
     cartoes = lives if len(lives) <= MAXIMO else lives[: MAXIMO - 1]
     embeds = []
     for live in cartoes:
-        emoji, _ = icones(inter.guild, live["plataforma"])
+        emoji, _ = await icones(inter.guild, live["plataforma"])
         titulo = discord.utils.escape_markdown((live["titulo"] or "Ao vivo")[:200])
         cor = COR_TWITCH if live["plataforma"] == "twitch" else COR_YOUTUBE
         e = discord.Embed(description=f"{emoji} **[{titulo}]({live['url']})**\n{detalhes_da_live(live)}", color=cor)
@@ -802,7 +826,7 @@ async def cmd_aovivo(inter: discord.Interaction):
     if resto:
         linhas = []
         for live in resto:
-            emoji, _ = icones(inter.guild, live["plataforma"])
+            emoji, _ = await icones(inter.guild, live["plataforma"])
             linhas.append(f"{emoji} **[{discord.utils.escape_markdown(live['nome'])}]({live['url']})**")
         embeds.append(discord.Embed(title=f"E mais {len(resto)}", description="\n".join(linhas)[:4000]))
 
