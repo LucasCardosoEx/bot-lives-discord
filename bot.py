@@ -39,15 +39,28 @@ COR_YOUTUBE = 0xFF0000
 # Ícones das plataformas (rodapé dos anúncios). Dá para trocar no .env por outro link de imagem.
 ICONE_TWITCH = os.getenv("ICONE_TWITCH") or "https://www.google.com/s2/favicons?domain=twitch.tv&sz=64"
 ICONE_YOUTUBE = os.getenv("ICONE_YOUTUBE") or "https://www.google.com/s2/favicons?domain=youtube.com&sz=64"
-# Emoji que aparece no texto. Se o servidor tiver emojis chamados "twitch" e "youtube",
-# eles são usados automaticamente. Senão, vale o do .env ou o padrão abaixo.
+# Emoji que aparece no texto. Se o bot (Developer Portal → Emojis) ou o servidor tiver emojis
+# chamados "twitch" e "youtube", eles são usados automaticamente. Senão, vale o do .env ou o padrão abaixo.
 EMOJI_TWITCH = os.getenv("EMOJI_TWITCH") or "🟣"
 EMOJI_YOUTUBE = os.getenv("EMOJI_YOUTUBE") or "▶️"
 
 
-# Nomes aceitos para os emojis do servidor (sem diferenciar maiúsculas)
+# Nomes aceitos para os emojis (sem diferenciar maiúsculas)
 NOMES_EMOJI = {"twitch": {"twitch"}, "youtube": {"youtube", "yt"}}
 _emojis_buscados = {}  # guild_id -> (horário, lista de emojis), para não consultar o Discord toda hora
+_emojis_do_bot = [0, []]  # [horário, lista] dos emojis enviados no próprio bot
+
+
+async def emojis_do_bot():
+    """Emojis do aplicativo (enviados no Developer Portal). Busca no Discord a cada 10 min no máximo."""
+    if time.time() - _emojis_do_bot[0] > 600:
+        try:
+            _emojis_do_bot[1] = await bot.fetch_application_emojis()
+            log.info("Emojis do bot: %s", ", ".join(e.name for e in _emojis_do_bot[1]) or "nenhum")
+        except discord.HTTPException as erro:
+            log.warning("Não consegui buscar os emojis do bot: %s", erro)
+        _emojis_do_bot[0] = time.time()
+    return _emojis_do_bot[1]
 
 
 async def emojis_do_servidor(guild):
@@ -70,12 +83,11 @@ async def icones(guild, plataforma):
         emoji, icone = EMOJI_TWITCH, ICONE_TWITCH
     else:
         emoji, icone = EMOJI_YOUTUBE, ICONE_YOUTUBE
-    proprio = None
+    # 1º emojis do próprio bot, 2º emojis do servidor
+    candidatos = list(await emojis_do_bot())
     if guild:
-        for e in await emojis_do_servidor(guild):
-            if e.name.lower() in NOMES_EMOJI[plataforma]:
-                proprio = e
-                break
+        candidatos += list(await emojis_do_servidor(guild))
+    proprio = next((e for e in candidatos if e.name.lower() in NOMES_EMOJI[plataforma]), None)
     if proprio:
         emoji = str(proprio)
         if not os.getenv(f"ICONE_{plataforma.upper()}"):
@@ -429,6 +441,7 @@ class LiveBot(discord.Client):
         else:
             log.warning("YouTube desativado: preencha YOUTUBE_API_KEY no .env")
         await self.tree.sync()
+        await emojis_do_bot()  # carrega os emojis do bot já na inicialização (aparece no log)
         self.verificar.start()
 
     async def close(self):
