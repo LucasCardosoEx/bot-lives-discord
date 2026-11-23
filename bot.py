@@ -448,6 +448,7 @@ class LiveBot(discord.Client):
                 "jogo": live.get("game_name"),
                 "espectadores": live.get("viewer_count"),
                 "inicio": data_iso(live.get("started_at")),
+                "avatar": await self.twitch.avatar(live["user_id"]),  # foto do canal (fica em cache)
             }
             for live in lives
         }
@@ -509,6 +510,7 @@ class LiveBot(discord.Client):
                     "jogo": None,
                     "espectadores": video.get("liveStreamingDetails", {}).get("concurrentViewers"),
                     "inicio": data_iso(video.get("liveStreamingDetails", {}).get("actualStartTime")),
+                    "avatar": await self.youtube.avatar(sn["channelId"]),  # foto do canal (fica em cache)
                 }
         self.ao_vivo_youtube = ao_vivo
 
@@ -773,30 +775,39 @@ async def cmd_aovivo(inter: discord.Interaction):
     if not lives:
         return await inter.response.send_message("😴 Ninguém está ao vivo agora.")
 
-    linhas = []
-    for live in lives:
-        emoji, _ = icones(inter.guild, live["plataforma"])
-        nome = discord.utils.escape_markdown(live["nome"])
-        titulo = discord.utils.escape_markdown((live["titulo"] or "")[:80])
-        detalhes = []
+    def detalhes_da_live(live):
+        partes = []
         if live["jogo"]:
-            detalhes.append(f"🎮 {live['jogo']}")
+            partes.append(f"🎮 {live['jogo']}")
         if live["espectadores"] is not None:
-            detalhes.append(f"👀 {int(live['espectadores']):,}".replace(",", "."))
+            partes.append(f"👀 {int(live['espectadores']):,}".replace(",", "."))
         if live["inicio"]:
-            detalhes.append(f"⏱️ <t:{int(live['inicio'].timestamp())}:R>")
-        linhas.append(f"{emoji} **[{nome}]({live['url']})** — {titulo}\n" + " • ".join(detalhes))
+            partes.append(f"⏱️ <t:{int(live['inicio'].timestamp())}:R>")
+        return " • ".join(partes)
 
-    descricao = ""
-    for linha in linhas:
-        if len(descricao) + len(linha) > 4000:  # limite do Discord
-            descricao += "\n…"
-            break
-        descricao += linha + "\n\n"
+    # Um cartão por streamer, com a foto do canal. O Discord aceita até 10 cartões por mensagem.
+    MAXIMO = 10
+    cartoes = lives if len(lives) <= MAXIMO else lives[: MAXIMO - 1]
+    embeds = []
+    for live in cartoes:
+        emoji, _ = icones(inter.guild, live["plataforma"])
+        titulo = discord.utils.escape_markdown((live["titulo"] or "Ao vivo")[:200])
+        cor = COR_TWITCH if live["plataforma"] == "twitch" else COR_YOUTUBE
+        e = discord.Embed(description=f"{emoji} **[{titulo}]({live['url']})**\n{detalhes_da_live(live)}", color=cor)
+        e.set_author(name=live["nome"], url=live["url"], icon_url=live.get("avatar"))
+        embeds.append(e)
 
-    e = discord.Embed(title=f"🔴 Ao vivo agora ({len(lives)})", description=descricao.strip(), color=COR_TWITCH)
-    e.set_footer(text=f"Atualizado a cada {INTERVALO_MINUTOS:g} min")
-    await inter.response.send_message(embed=e)
+    # se tiver mais de 10 pessoas, as que sobrarem vão listadas num último cartão
+    resto = lives[len(cartoes):]
+    if resto:
+        linhas = []
+        for live in resto:
+            emoji, _ = icones(inter.guild, live["plataforma"])
+            linhas.append(f"{emoji} **[{discord.utils.escape_markdown(live['nome'])}]({live['url']})**")
+        embeds.append(discord.Embed(title=f"E mais {len(resto)}", description="\n".join(linhas)[:4000]))
+
+    embeds[-1].set_footer(text=f"Atualizado a cada {INTERVALO_MINUTOS:g} min")
+    await inter.response.send_message(f"🔴 **Ao vivo agora ({len(lives)})**", embeds=embeds)
 
 
 @bot.tree.command(name="testar", description="Envia uma mensagem de teste no canal de anúncio")
