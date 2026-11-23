@@ -46,7 +46,7 @@ EMOJI_YOUTUBE = os.getenv("EMOJI_YOUTUBE") or "▶️"
 
 
 # Nomes aceitos para os emojis do servidor (sem diferenciar maiúsculas)
-NOMES_EMOJI = {"twitch": {"twitch", "twich"}, "youtube": {"youtube", "yt"}}
+NOMES_EMOJI = {"twitch": {"twitch"}, "youtube": {"youtube", "yt"}}
 _emojis_buscados = {}  # guild_id -> (horário, lista de emojis), para não consultar o Discord toda hora
 
 
