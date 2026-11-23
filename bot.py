@@ -39,9 +39,24 @@ COR_YOUTUBE = 0xFF0000
 # Ícones das plataformas (rodapé dos anúncios). Dá para trocar no .env por outro link de imagem.
 ICONE_TWITCH = os.getenv("ICONE_TWITCH") or "https://www.google.com/s2/favicons?domain=twitch.tv&sz=64"
 ICONE_YOUTUBE = os.getenv("ICONE_YOUTUBE") or "https://www.google.com/s2/favicons?domain=youtube.com&sz=64"
-# Emoji que aparece no texto. Para usar um emoji do servidor: <:twitch:ID_DO_EMOJI>
+# Emoji que aparece no texto. Se o servidor tiver emojis chamados "twitch" e "youtube",
+# eles são usados automaticamente. Senão, vale o do .env ou o padrão abaixo.
 EMOJI_TWITCH = os.getenv("EMOJI_TWITCH") or "🟣"
 EMOJI_YOUTUBE = os.getenv("EMOJI_YOUTUBE") or "▶️"
+
+
+def icones(guild, plataforma):
+    """Retorna (emoji para o texto, link do ícone do rodapé) para este servidor."""
+    if plataforma == "twitch":
+        emoji, icone = EMOJI_TWITCH, ICONE_TWITCH
+    else:
+        emoji, icone = EMOJI_YOUTUBE, ICONE_YOUTUBE
+    proprio = discord.utils.get(guild.emojis, name=plataforma) if guild else None
+    if proprio:
+        emoji = str(proprio)
+        if not os.getenv(f"ICONE_{plataforma.upper()}"):
+            icone = proprio.url  # usa a mesma imagem do emoji no rodapé
+    return emoji, icone
 
 # Vídeos publicados há mais tempo que isso nunca são divulgados (evita spam de vídeos antigos)
 IDADE_MAXIMA_VIDEO = timedelta(hours=24)
@@ -446,7 +461,8 @@ class LiveBot(discord.Client):
             await self.anunciar(
                 lambda s, l=login: l in s["twitch"],
                 e,
-                f"🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo na {EMOJI_TWITCH} **Twitch**! <{url}>",
+                f"🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo na {{emoji}} **Twitch**! <{url}>",
+                plataforma="twitch",
             )
             marcar_anunciado(chave)
 
@@ -510,7 +526,8 @@ class LiveBot(discord.Client):
                     await self.anunciar(
                         lambda s, c=cid: c in s["youtube"],
                         e,
-                        f"🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo no {EMOJI_YOUTUBE} **YouTube**! <{url}>",
+                        f"🔴 **{discord.utils.escape_markdown(nome)}** está ao vivo no {{emoji}} **YouTube**! <{url}>",
+                        plataforma="youtube",
                     )
                     marcar_anunciado(chave)
                 continue
@@ -531,11 +548,12 @@ class LiveBot(discord.Client):
             await self.anunciar(
                 lambda s, c=cid, sh=short: c in s["youtube"] and s["videos"] and (s["shorts"] or not sh),
                 e,
-                f"{EMOJI_YOUTUBE} **{discord.utils.escape_markdown(nome)}** postou {tipo} no **YouTube**! <{url}>",
+                f"{{emoji}} **{discord.utils.escape_markdown(nome)}** postou {tipo} no **YouTube**! <{url}>",
                 video=True,
+                plataforma="youtube",
             )
 
-    async def anunciar(self, filtro, embed, texto, video=False):
+    async def anunciar(self, filtro, embed, texto, video=False, plataforma="twitch"):
         for gid, s in todos_servidores():
             canal_id = (s["canal_videos"] or s["canal"]) if video else s["canal"]
             if not canal_id or not filtro(s):
@@ -546,10 +564,14 @@ class LiveBot(discord.Client):
                 continue
             marcar = s["cargo"] and (s["marcar_videos"] or not video)
             mencao = f"<@&{s['cargo']}> " if marcar else ""
+            # cada servidor pode ter os próprios emojis "twitch"/"youtube"
+            emoji, icone = icones(getattr(canal, "guild", None), plataforma)
+            e = embed.copy()
+            e.set_footer(text=embed.footer.text, icon_url=icone)
             try:
                 await canal.send(
-                    f"{mencao}{texto}",
-                    embed=embed,
+                    f"{mencao}{texto.replace('{emoji}', emoji)}",
+                    embed=e,
                     allowed_mentions=discord.AllowedMentions(roles=True),
                 )
                 log.info("Anunciado no servidor %s: %s", gid, texto)
@@ -753,7 +775,7 @@ async def cmd_aovivo(inter: discord.Interaction):
 
     linhas = []
     for live in lives:
-        emoji = EMOJI_TWITCH if live["plataforma"] == "twitch" else EMOJI_YOUTUBE
+        emoji, _ = icones(inter.guild, live["plataforma"])
         nome = discord.utils.escape_markdown(live["nome"])
         titulo = discord.utils.escape_markdown((live["titulo"] or "")[:80])
         detalhes = []

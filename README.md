@@ -62,10 +62,9 @@ Os outros comandos só aparecem para quem tem permissão de **Gerenciar servidor
 
 ### Ícones
 Os anúncios mostram a foto do streamer e o ícone da plataforma no rodapé. O texto usa 🟣 para a Twitch e ▶️ para o YouTube.
-Para usar emojis próprios do servidor:
-1. Envie as imagens como emoji em **Configurações do servidor → Emoji** (ex.: nomes `twitch` e `youtube`).
-2. Num canal, digite `\:twitch:` e envie. Vai aparecer um código como `<:twitch:123456789012345678>`.
-3. Cole esse código no `.env`, em `EMOJI_TWITCH` (e faça o mesmo com o `EMOJI_YOUTUBE`), e reinicie o bot.
+Para usar emojis próprios do servidor, basta criar em **Configurações do servidor → Emoji** emojis com os nomes **`twitch`** e **`youtube`**. O bot encontra sozinho e usa no texto e no rodapé dos anúncios, sem precisar reiniciar.
+
+Para forçar outro emoji, digite `\:nome_do_emoji:` num canal, copie o código que aparece (ex.: `<:twitch:123456789012345678>`) e cole no `.env`, em `EMOJI_TWITCH` ou `EMOJI_YOUTUBE`.
 
 ## Observações
 - O bot só anuncia enquanto estiver rodando. Para ficar 24h, deixe num PC ligado ou numa hospedagem (VPS ou um serviço de hospedagem de bots).
